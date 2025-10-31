@@ -4,8 +4,8 @@ import smtplib
 import requests
 import time
 import openai
-import re      # Keep re for finding the JSON
-import json    # --- NEW IMPORT for parsing JSON
+import json    # Keep json import
+import re      # No longer needed for parsing, but not harmful
 
 try:
     from dotenv import load_dotenv
@@ -22,20 +22,15 @@ except ImportError:
     print("Please install it with: pip install google-genai", file=sys.stderr)
     sys.exit(1)
 
-# NOTE: We are removing the 'beautifulsoup4' dependency
-# as the new method will not require web scraping.
 
 gemini_client = None
 openai_client = None
 
 def load_environment():
-    """
-    Loads API keys from .env file into environment variables.
-    Returns True on success, False on failure.
-    """
+    """Loads API keys from .env file."""
     load_dotenv()
     if "GEMINI_API_KEY" not in os.environ or "OPENAI_API_KEY" not in os.environ:
-        print("Error: .env file not found or is missing GEMINI_API_KEY or OPENAI_API_KEY", file=sys.stderr)
+        print("Error: .env file missing GEMINI_API_KEY or OPENAI_API_KEY", file=sys.stderr)
         return False
     return True
 
@@ -89,54 +84,44 @@ def check_openai():
 def fetch_headlines_with_gemini():
     """
     Uses Gemini API to fetch 5 recent news headlines, summaries, and URLs
-    as a JSON object.
-    
-    Returns the raw text response which should contain the JSON.
+    as a JSON object, using JSON Mode for reliable output.
     """
     global gemini_client
     if not gemini_client:
         print("Error: Gemini client not initialized.", file=sys.stderr)
         return None
 
-    print("Attempting to fetch Google News headlines and summaries via Gemini...")
+    print("Attempting to fetch Google News (in JSON Mode) via Gemini...")
     try:
         grounding_tool = types.Tool(
             google_search=types.GoogleSearch()
         )
+        
+        # --- UPDATED: Use JSON Mode ---
         generation_config = types.GenerateContentConfig(
-            tools=[grounding_tool]
+            tools=[grounding_tool],
+            response_mime_type="application/json" # This forces JSON output
         )
+        # --- END UPDATED ---
 
-        # --- UPDATED PROMPT ---
-        # Ask for title, summary, and url, formatted as JSON.
+        # --- UPDATED PROMPT for JSON Mode ---
+        # We must explicitly describe the JSON schema for the model.
         prompt = """
-        Act as a news aggregation assistant.
-        Please find the top 5 most recent, major news headlines from Google News.
+        Use the Google Search tool to find 5 recent, major news headlines.
         
-        For each headline, provide:
-        1. The headline title
-        2. A concise 1-2 sentence summary of the article's content.
-        3. The direct URL link to the article.
+        Return your response as a valid JSON array of objects.
         
-        Format the output as a single, valid JSON array of objects.
-        Each object must have a "title", "summary", and "url" key.
-        
-        Do NOT include any text before or after the JSON array (e.g., no "Here is the JSON:").
-        Your entire response should be only the JSON array.
-        
-        Example:
+        The JSON schema must be:
         [
           {
-            "title": "Example Headline 1",
-            "summary": "This is a one-sentence summary of what happened in the first article.",
-            "url": "https://example.com/article1"
-          },
-          {
-            "title": "Example Headline 2",
-            "summary": "This is a summary of the second article, explaining the key point.",
-            "url": "https://example.com/article2"
+            "title": "string (The headline of the article)",
+            "summary": "string (A concise 1-2 sentence summary of the article)",
+            "url": "string (The direct URL to the article)"
           }
         ]
+        
+        Your entire response must be *only* this JSON array.
+        Do not add any text before or after the array.
         """
         # --- END UPDATED PROMPT ---
         
@@ -147,42 +132,32 @@ def fetch_headlines_with_gemini():
         )
         
         if response.text:
-            print("Gemini headline fetch SUCCEEDED.")
+            print("Gemini headline fetch SUCCEEDED (Raw JSON received).")
             return response.text
         else:
             print("Gemini headline fetch FAILED: No text in response.", file=sys.stderr)
             return None
     except Exception as e:
-        print(f"Gemini headline fetch FAILED: {e}", file=sys.stderr)
+        # This will now catch errors if the model *can't* create JSON
+        print(f"Gemini headline fetch FAILED with exception: {e}", file=sys.stderr)
         return None
 
 # --- UPDATED FUNCTION to parse JSON ---
-def parse_headlines(gemini_output):
+def parse_headlines(gemini_json_output):
     """
-    Parses the raw text output from Gemini to find and load the JSON data.
+    Parses the raw JSON string output from Gemini.
     Returns a list of dictionaries.
     """
     print("Parsing JSON from Gemini output...")
     try:
-        # Find the JSON block. This regex finds the first '[' to the last ']'
-        # This is robust against Gemini adding "Here's the JSON: \n [...] \n"
-        match = re.search(r"\[.*\]", gemini_output, re.DOTALL)
-        if not match:
-            print("Error: No JSON array found in Gemini output.", file=sys.stderr)
-            print("Raw output:", gemini_output, file=sys.stderr)
-            return []
-            
-        json_string = match.group(0)
+        # With JSON mode, the output *is* the JSON string. No regex needed.
+        headlines_list = json.loads(gemini_json_output)
         
-        # Parse the JSON string into a Python list
-        headlines_list = json.loads(json_string)
-        
-        # Basic validation
         if not isinstance(headlines_list, list) or not headlines_list:
             print("Error: Parsed JSON is not a list or is empty.", file=sys.stderr)
             return []
 
-        # Check for required keys in the first item
+        # Validate keys in the first item
         if "title" not in headlines_list[0] or \
            "summary" not in headlines_list[0] or \
            "url" not in headlines_list[0]:
@@ -193,16 +168,12 @@ def parse_headlines(gemini_output):
 
     except json.JSONDecodeError as e:
         print(f"Error: Failed to decode JSON from Gemini. {e}", file=sys.stderr)
-        print("Raw output being parsed:", gemini_output, file=sys.stderr)
+        print("Raw output (which should be JSON):", gemini_json_output, file=sys.stderr)
         return []
     except Exception as e:
-        print(f"Error parsing headlines: {e}", file=sys.stderr)
+        print(f"An unexpected error occurred during parsing: {e}", file=sys.stderr)
         return []
 
-# --- FUNCTION DELETED ---
-# We no longer need fetch_article_text because Gemini provides the summary.
-
-# --- UPDATED FUNCTION to use Gemini's summary ---
 def get_openai_perspective(gemini_summary, article_title):
     """
     Uses the OpenAI API to provide a "second opinion" or alternative
@@ -218,7 +189,7 @@ def get_openai_perspective(gemini_summary, article_title):
         response = openai_client.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=[
-                {"role": "system", "content": "You are a news summarization assistant. You will be given a news headline and a summary from another AI. Your job is to rewrite that summary in your own words, maintaining a concise and strictly neutral, factual tone."},
+                {"role": "system", "content": "You are a news summarization assistant. You will be given a news headline and a summary. Rewrite that summary in your own words, maintaining a concise and strictly neutral, factual tone."},
                 {"role": "user", "content": f"Please provide a one-paragraph, neutral summary based on the following information:\n\nHeadline: {article_title}\n\nSummary: {gemini_summary}"}
             ],
             max_tokens=150,
@@ -245,17 +216,14 @@ def main():
         print("\nBoth APIs are working.")
         time.sleep(1)
         
-        # --- UPDATED SCRIPT LOGIC ---
         raw_json_text = fetch_headlines_with_gemini()
         
         if raw_json_text:
-            # headlines_list is now a list of dicts
             headlines_list = parse_headlines(raw_json_text)
             
             if headlines_list:
                 print("\n--- Headlines & AI Summaries ---")
                 
-                # Loop through the list of dictionaries
                 for article in headlines_list:
                     title = article.get('title', 'No Title Found')
                     url = article.get('url', 'No URL Found')
@@ -265,7 +233,6 @@ def main():
                     print(f"Link: {url}")
                     print(f"\nGemini Summary:\n{gemini_summary}")
                     
-                    # Now, send Gemini's summary to OpenAI
                     openai_summary = get_openai_perspective(gemini_summary, title)
                     
                     if openai_summary:
@@ -274,12 +241,11 @@ def main():
                         print("\nOpenAI Summary: Could not be generated.")
                         
                     print("-------------------------------------")
-                    time.sleep(1) # Be respectful
+                    time.sleep(1) 
             else:
                 print("Could not parse headlines from Gemini output. Exiting.", file=sys.stderr)
         else:
             print("Could not fetch headlines from Gemini. Exiting.", file=sys.stderr)
-        # --- END UPDATED SCRIPT LOGIC ---
 
     else:
         print("\nOne or more API checks failed. Please check your keys and network.", file=sys.stderr)
