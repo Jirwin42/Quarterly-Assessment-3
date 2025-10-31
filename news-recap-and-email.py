@@ -5,6 +5,9 @@ import requests
 import time
 import openai
 import json
+from datetime import datetime  # --- NEW IMPORT for date
+from email.mime.text import MIMEText  # --- NEW IMPORTS for email formatting
+from email.mime.multipart import MIMEMultipart
 
 try:
     from dotenv import load_dotenv
@@ -26,11 +29,22 @@ gemini_client = None
 openai_client = None
 
 def load_environment():
-    """Loads API keys from .env file."""
+    """Loads API keys and email config from .env file."""
     load_dotenv()
+    
+    # Check for API keys
     if "GEMINI_API_KEY" not in os.environ or "OPENAI_API_KEY" not in os.environ:
         print("Error: .env file missing GEMINI_API_KEY or OPENAI_API_KEY", file=sys.stderr)
         return False
+        
+    # --- NEW: Check for Email variables ---
+    email_vars = ["EMAIL_SENDER", "EMAIL_APP_PASSWORD", "EMAIL_RECEIVER", "EMAIL_HOST", "EMAIL_PORT"]
+    missing_vars = [v for v in email_vars if v not in os.environ]
+    if missing_vars:
+        print(f"Error: .env file is missing the following email variables: {', '.join(missing_vars)}", file=sys.stderr)
+        print("Please see the guide on how to set these up.", file=sys.stderr)
+        return False
+        
     return True
 
 def check_gemini():
@@ -44,7 +58,7 @@ def check_gemini():
         print("Authenticating with Gemini...")
         gemini_client = genai.Client(api_key=gemini_key)
         response = gemini_client.models.generate_content(
-            model='gemini-2.5-pro',
+            model='gemini-2.5-flash',
             contents="Hello"
         )
         if response.text:
@@ -84,7 +98,7 @@ def check_openai():
 def fetch_headlines_as_text_with_gemini():
     """
     STEP 1: Uses Gemini API + Google Search tool to fetch news.
-    The output is expected to be a messy, natural language string.
+    Output is a natural language string.
     """
     global gemini_client
     if not gemini_client:
@@ -96,22 +110,21 @@ def fetch_headlines_as_text_with_gemini():
         grounding_tool = types.Tool(
             google_search=types.GoogleSearch()
         )
-        
-        # We ARE using a tool, so we CANNOT use JSON mode.
         generation_config = types.GenerateContentConfig(
             tools=[grounding_tool]
         )
 
+        # --- UPDATED PROMPT: Added 'author' ---
         prompt = """
         Use the Google Search tool to find the 5 most recent, major news headlines.
         
         For each headline, provide:
         1. The headline title
-        2. A concise 1-2 sentence summary of the article's content.
-        3. The direct URL link to the article.
+        2. The author (if available, otherwise "N/A")
+        3. A concise 1-2 sentence summary of the article's content.
+        4. The direct URL link to the article.
         
         Format this as a simple, human-readable, numbered list.
-        Do not worry about JSON. Just list the 5 findings.
         """
         
         response = gemini_client.models.generate_content(
@@ -130,7 +143,7 @@ def fetch_headlines_as_text_with_gemini():
         print(f"Gemini text fetch FAILED: {e}", file=sys.stderr)
         return None
 
-# --- NEW FUNCTION (STEP 2): Convert text to clean JSON ---
+# --- STEP 2: Convert text to clean JSON ---
 def convert_text_to_json_with_gemini(raw_text):
     """
     STEP 2: Uses Gemini API in JSON Mode to parse the messy text
@@ -143,12 +156,11 @@ def convert_text_to_json_with_gemini(raw_text):
 
     print("Step 2: Converting raw text to JSON using JSON Mode...")
     try:
-        # We are NOT using a tool, so we CAN use JSON mode.
         generation_config = types.GenerateContentConfig(
             response_mime_type="application/json"
         )
         
-        # Prompt to define the schema and provide the messy text
+        # --- UPDATED PROMPT: Added 'author' to the schema ---
         prompt = f"""
         Please parse the following text and convert it into a valid JSON array.
         
@@ -157,13 +169,13 @@ def convert_text_to_json_with_gemini(raw_text):
           {{
             "title": "string (The headline of the article)",
             "summary": "string (The concise summary of the article)",
-            "url": "string (The direct URL to the article)"
+            "url": "string (The direct URL to the article)",
+            "author": "string (The author's name, or 'N/A' if not found)"
           }}
         ]
         
         Your entire response must be *only* this JSON array.
-        Ignore any conversational text, apologies, or non-headline content
-        in the input text. Just extract the articles.
+        Ignore any conversational text or non-headline content.
         
         Here is the text to parse:
         ---
@@ -189,18 +201,17 @@ def convert_text_to_json_with_gemini(raw_text):
 
 def parse_headlines(gemini_json_output):
     """
-    Parses the raw JSON string output from Step 2.
-    Returns a list of dictionaries.
+    Step 3: Parses the raw JSON string output from Step 2.
     """
     print("Step 3: Parsing the guaranteed JSON output...")
     try:
-        # The output from step 2 should be a perfect JSON string
         headlines_list = json.loads(gemini_json_output)
         
         if not isinstance(headlines_list, list) or not headlines_list:
             print("Error: Parsed JSON is not a list or is empty.", file=sys.stderr)
             return []
 
+        # --- UPDATED VALIDATION: 'author' is optional, so we don't check for it ---
         if "title" not in headlines_list[0] or \
            "summary" not in headlines_list[0] or \
            "url" not in headlines_list[0]:
@@ -219,7 +230,7 @@ def parse_headlines(gemini_json_output):
 
 def get_openai_perspective(gemini_summary, article_title):
     """
-    Uses OpenAI to provide a "second opinion" summary.
+    Step 4: Uses OpenAI to provide a "second opinion" summary.
     """
     global openai_client
     if not openai_client:
@@ -247,6 +258,54 @@ def get_openai_perspective(gemini_summary, article_title):
         print(f"OpenAI summary FAILED: {e}", file=sys.stderr)
         return None
 
+# --- NEW FUNCTION: Step 5 ---
+def send_email(subject, body, to_email):
+    """
+    Step 5: Sends the email using smtplib.
+    """
+    print("Step 5: Preparing to send email...")
+    
+    # Get credentials from environment
+    sender_email = os.environ.get("EMAIL_SENDER")
+    sender_password = os.environ.get("EMAIL_APP_PASSWORD")
+    host = os.environ.get("EMAIL_HOST")
+    port = int(os.environ.get("EMAIL_PORT", 587)) # Default to 587
+
+    # Create the email message
+    msg = MIMEMultipart()
+    msg['From'] = sender_email
+    msg['To'] = to_email
+    msg['Subject'] = subject
+    
+    # Attach the body as plain text
+    msg.attach(MIMEText(body, 'plain'))
+    
+    try:
+        print(f"Connecting to email server {host}:{port}...")
+        # Connect to the SMTP server
+        server = smtplib.SMTP(host, port)
+        server.ehlo()  # Identify ourselves to the server
+        server.starttls()  # Secure the connection
+        server.ehlo()  # Re-identify ourselves over the secure connection
+        
+        print("Logging in to email server...")
+        server.login(sender_email, sender_password)
+        
+        print(f"Sending email to {to_email}...")
+        server.send_message(msg)
+        
+        print("Email sent successfully!")
+        
+    except smtplib.SMTPAuthenticationError:
+        print("Email FAILED: Authentication error.", file=sys.stderr)
+        print("Check your EMAIL_SENDER and EMAIL_APP_PASSWORD.", file=sys.stderr)
+    except Exception as e:
+        print(f"Email FAILED: An error occurred: {e}", file=sys.stderr)
+    finally:
+        if 'server' in locals():
+            server.quit() # Always close the connection
+
+
 def main():
     if not load_environment():
         sys.exit(1)
@@ -258,41 +317,71 @@ def main():
         print("\nBoth APIs are working.")
         time.sleep(1)
         
-        # --- UPDATED 3-STEP LOGIC ---
-        
-        # 1. Get raw text
         raw_text = fetch_headlines_as_text_with_gemini()
         
         if raw_text:
-            # 2. Convert raw text to clean JSON
             json_text = convert_text_to_json_with_gemini(raw_text)
             
             if json_text:
-                # 3. Parse the clean JSON
                 headlines_list = parse_headlines(json_text)
                 
                 if headlines_list:
                     print("\n--- Headlines & AI Summaries ---")
                     
-                    for article in headlines_list:
+                    # --- NEW: Prepare email content ---
+                    today_date = datetime.now().strftime("%m/%d/%Y")
+                    email_subject = f"News Summary for {today_date}"
+                    
+                    # This list will hold the formatted string for each article
+                    email_body_parts = []
+                    email_body_parts.append(f"News Summary for {today_date}, top {len(headlines_list)} stories.\n")
+                    
+                    # Use enumerate to get a counter (1, 2, 3...)
+                    for i, article in enumerate(headlines_list, 1):
                         title = article.get('title', 'No Title Found')
                         url = article.get('url', 'No URL Found')
                         gemini_summary = article.get('summary', 'No Summary Found')
+                        
+                        # Use .get() for 'author' as it's optional
+                        author = article.get('author', 'N/A')
+                        
+                        # --- 4. Get OpenAI summary ---
+                        openai_summary = get_openai_perspective(gemini_summary, title)
+                        if not openai_summary:
+                            openai_summary = "Summary could not be generated by OpenAI."
 
+                        # --- Print to console ---
                         print(f"\n## {title}")
                         print(f"Link: {url}")
+                        print(f"Author: {author}")
                         print(f"\nGemini Summary:\n{gemini_summary}")
-                        
-                        # 4. Send to OpenAI
-                        openai_summary = get_openai_perspective(gemini_summary, title)
-                        
-                        if openai_summary:
-                            print(f"\nOpenAI Summary:\n{openai_summary}")
-                        else:
-                            print("\nOpenAI Summary: Could not be generated.")
-                            
+                        print(f"\nOpenAI Summary:\n{openai_summary}")
                         print("-------------------------------------")
-                        time.sleep(1) 
+                        
+                        # --- Build the email string for this article ---
+                        
+                        # Only include author if it's not "N/A"
+                        author_part = f"{author} - " if author and author.lower() != 'n/a' else ""
+                        
+                        line_1 = f"{i}. {title} - {author_part}{url}"
+                        
+                        article_string = (
+                            f"{line_1}\n\n"
+                            f"Summary by Gemini:\n{gemini_summary}\n\n"
+                            f"Summary by OpenAI:\n{openai_summary}"
+                        )
+                        email_body_parts.append(article_string)
+                        
+                        time.sleep(1)
+                    
+                    # --- 5. Send the email ---
+                    
+                    # Join all the parts with two newlines
+                    final_email_body = "\n\n".join(email_body_parts)
+                    receiver_email = os.environ.get("EMAIL_RECEIVER")
+                    
+                    send_email(email_subject, final_email_body, receiver_email)
+                    
                 else:
                     print("Could not parse the JSON output from Gemini. Exiting.", file=sys.stderr)
             else:
