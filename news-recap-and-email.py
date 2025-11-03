@@ -5,9 +5,11 @@ import requests
 import time
 import openai
 import json
+import mimetypes  # --- NEW: To guess image type ---
 from datetime import datetime
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from email.mime.image import MIMEImage  # --- NEW: For embedding images ---
 
 try:
     from dotenv import load_dotenv
@@ -118,8 +120,8 @@ def fetch_headlines_as_text_with_gemini():
         1. The headline title
         2. The author (if available, otherwise "N/A")
         3. A concise 1-2 sentence summary of the article's content.
-        4. The direct URL link to the article.
-        5. The URL for a relevant headline image (if available, otherwise "N/A").
+        4. The *full, complete, and non-truncated* direct URL link to the article.
+        5. The *full, complete, and non-truncated* URL for a relevant headline image (if available, otherwise "N/A").
         Format this as a simple, human-readable, numbered list.
         """
         # --- END UPDATED PROMPT ---
@@ -139,7 +141,6 @@ def fetch_headlines_as_text_with_gemini():
         print(f"Gemini text fetch FAILED: {e}", file=sys.stderr)
         return None
 
-# --- UPDATED FUNCTION: Step 2 ---
 def convert_text_to_json_with_gemini(raw_text):
     """
     STEP 2: Uses Gemini API in JSON Mode to parse the messy text
@@ -155,7 +156,6 @@ def convert_text_to_json_with_gemini(raw_text):
         generation_config = types.GenerateContentConfig(
             response_mime_type="application/json"
         )
-        # --- UPDATED PROMPT (JSON SCHEMA) ---
         prompt = f"""
         Please parse the following text and convert it into a valid JSON array.
         The JSON schema must be:
@@ -163,9 +163,9 @@ def convert_text_to_json_with_gemini(raw_text):
           {{
             "title": "string (The headline of the article)",
             "summary": "string (The concise summary of the article)",
-            "url": "string (The direct URL to the article)",
+            "url": "string (The full, non-truncated direct URL)",
             "author": "string (The author's name, or 'N/A' if not found)",
-            "image_url": "string (The URL of a relevant image, or 'N/A' if not found)"
+            "image_url": "string (The full, non-truncated URL of an image, or 'N/A')"
           }}
         ]
         Your entire response must be *only* this JSON array.
@@ -175,8 +175,6 @@ def convert_text_to_json_with_gemini(raw_text):
         {raw_text}
         ---
         """
-        # --- END UPDATED PROMPT ---
-        
         response = gemini_client.models.generate_content(
             model='gemini-2.5-flash',
             contents=prompt,
@@ -245,7 +243,8 @@ def get_openai_perspective(gemini_summary, article_title):
         print(f"OpenAI summary FAILED: {e}", file=sys.stderr)
         return None
 
-def send_email(subject, html_body, to_email):
+# --- UPDATED FUNCTION: Step 5 ---
+def send_email(subject, html_body, to_email, attachments=None):
     """
     Step 5: Sends the email using smtplib.
     This function now sends an HTML formatted email.
@@ -257,12 +256,26 @@ def send_email(subject, html_body, to_email):
     host = os.environ.get("EMAIL_HOST")
     port = int(os.environ.get("EMAIL_PORT", 587)) 
 
-    msg = MIMEMultipart()
+    # --- UPDATED: Use 'related' to embed images ---
+    msg = MIMEMultipart('related')
     msg['From'] = sender_email
     msg['To'] = to_email
     msg['Subject'] = subject
     
+    # --- Attach the HTML body ---
     msg.attach(MIMEText(html_body, 'html'))
+    
+    # --- NEW: Attach any images ---
+    if attachments:
+        for cid, (data, subtype) in attachments.items():
+            try:
+                img = MIMEImage(data, _subtype=subtype)
+                img.add_header('Content-ID', f'<{cid}>')
+                msg.attach(img)
+                print(f"Attached image with CID: {cid}")
+            except Exception as e:
+                print(f"Warning: Could not attach image {cid}. {e}", file=sys.stderr)
+    # --- END NEW BLOCK ---
     
     try:
         print(f"Connecting to email server {host}:{port}...")
@@ -315,6 +328,8 @@ def main():
                     email_subject = f"News Summary for {today_date}"
                     
                     email_body_parts = []
+                    # --- NEW: Dictionary to hold images for embedding ---
+                    email_attachments = {}
                     
                     email_body_parts.append(f"<h1 style='font-family: Arial, sans-serif;'>News Summary for {today_date}</h1>")
                     email_body_parts.append(f"<p style='font-family: Arial, sans-serif;'>Your top {len(headlines_list)} stories.</p><hr>")
@@ -324,8 +339,6 @@ def main():
                         url = article.get('url', 'No URL Found')
                         gemini_summary = article.get('summary', 'No Summary Found')
                         author = article.get('author', 'N/A')
-                        
-                        # --- NEW: Get the image URL ---
                         image_url = article.get('image_url', None)
 
                         # 4. Get OpenAI summary
@@ -337,7 +350,6 @@ def main():
                         print(f"\n## {title}")
                         print(f"Link: {url}")
                         print(f"Author: {author}")
-                        # --- NEW: Print image URL to console ---
                         print(f"Image: {image_url if image_url else 'N/A'}")
                         print(f"\nGemini Summary:\n{gemini_summary}")
                         print(f"\nOpenAI Summary:\n{openai_summary}")
@@ -347,29 +359,51 @@ def main():
                         # --- UPDATED: Build the HTML string for this article ---
                         
                         # Only include author if it's not "N/A"
-                        author_part = f"<i>{author}</i> - " if author and author.lower() != 'n/a' else ""
+                        author_part = f"<i style='color: #555;'>{author}</i>" if author and author.lower() != 'n/a' else ""
                         
-                        # Create a clickable link
-                        link = f'<a href="{url}">{url}</a>'
-                        
-                        # --- NEW: Create image HTML if available ---
-                        # We check for None, 'n/a', and empty string
+                        # --- NEW: Try to download and embed the image ---
                         image_part = ""
                         if image_url and image_url.lower() not in ['n/a', 'none', '']:
-                            image_part = f'''
-                            <img src="{image_url}"
-                                 alt="{title}"
-                                 style="max-width: 100%; height: auto; border-radius: 8px; margin-bottom: 10px;">
-                            '''
+                            try:
+                                # Use a unique Content-ID for each image
+                                image_cid = f'image{i}'
+                                
+                                # Fetch the image
+                                print(f"Downloading image: {image_url}")
+                                # Add a user-agent to look like a browser
+                                headers = {'User-Agent': 'Mozilla/5.0'}
+                                img_response = requests.get(image_url, headers=headers, timeout=10)
+                                
+                                if img_response.status_code == 200:
+                                    # Guess the image type (jpeg, png)
+                                    ctype, _ = mimetypes.guess_type(image_url)
+                                    if ctype and ctype.split('/')[0] == 'image':
+                                        subtype = ctype.split('/')[1]
+                                        # Add to our attachments dict
+                                        email_attachments[image_cid] = (img_response.content, subtype)
+                                        # Set the HTML to use the CID
+                                        image_part = f'''
+                                        <img src="cid:{image_cid}"
+                                             alt="{title}"
+                                             style="max-width: 100%; height: auto; border-radius: 8px; margin-bottom: 10px;">
+                                        '''
+                                    else:
+                                        print(f"Warning: Could not determine image type for {image_url}", file=sys.stderr)
+                                else:
+                                    print(f"Warning: Failed to download image (Status {img_response.status_code})", file=sys.stderr)
+                            except Exception as e:
+                                print(f"Warning: Error downloading image {image_url}. {e}", file=sys.stderr)
+                        # --- END NEW IMAGE BLOCK ---
+
                         
                         # Build the HTML block for this article
                         article_html = f"""
                         <div style="font-family: Arial, sans-serif; margin-bottom: 20px;">
                             <p style="font-size: 1.2em; margin-bottom: 5px;">
-                                <b>{i}. {title}</b>
+                                <b>{i}. <a href="{url}" style="color: #1a0dab; text-decoration: none;">{title}</a></b>
                             </p>
                             <p style="font-size: 0.9em; color: #333; margin-top: 0; margin-bottom: 10px;">
-                                {author_part}{link}
+                                {author_part}
                             </p>
                             
                             {image_part}
@@ -387,7 +421,6 @@ def main():
                         <hr style="border: 0; border-top: 1px solid #eee;">
                         """
                         email_body_parts.append(article_html)
-                        # --- END UPDATED HTML BLOCK ---
                         
                         time.sleep(1)
                     
@@ -403,7 +436,8 @@ def main():
                     """
                     receiver_email = os.environ.get("EMAIL_RECEIVER")
                     
-                    send_email(email_subject, final_email_body, receiver_email)
+                    # --- UPDATED: Pass attachments to the send function ---
+                    send_email(email_subject, final_email_body, receiver_email, email_attachments)
                     
                 else:
                     print("Could not parse the JSON output from Gemini. Exiting.", file=sys.stderr)
