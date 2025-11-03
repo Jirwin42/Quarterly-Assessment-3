@@ -92,6 +92,7 @@ def check_openai():
         print(f"OpenAI API Check FAILED: {e}", file=sys.stderr)
         return False
 
+# --- UPDATED FUNCTION: Step 1 ---
 def fetch_headlines_as_text_with_gemini():
     """
     STEP 1: Uses Gemini API + Google Search tool to fetch news.
@@ -110,6 +111,7 @@ def fetch_headlines_as_text_with_gemini():
         generation_config = types.GenerateContentConfig(
             tools=[grounding_tool]
         )
+        # --- UPDATED PROMPT ---
         prompt = """
         Use the Google Search tool to find the 5 most recent, major news headlines.
         For each headline, provide:
@@ -117,8 +119,11 @@ def fetch_headlines_as_text_with_gemini():
         2. The author (if available, otherwise "N/A")
         3. A concise 1-2 sentence summary of the article's content.
         4. The direct URL link to the article.
+        5. The URL for a relevant headline image (if available, otherwise "N/A").
         Format this as a simple, human-readable, numbered list.
         """
+        # --- END UPDATED PROMPT ---
+        
         response = gemini_client.models.generate_content(
             model='gemini-2.5-flash',
             contents=prompt,
@@ -134,6 +139,7 @@ def fetch_headlines_as_text_with_gemini():
         print(f"Gemini text fetch FAILED: {e}", file=sys.stderr)
         return None
 
+# --- UPDATED FUNCTION: Step 2 ---
 def convert_text_to_json_with_gemini(raw_text):
     """
     STEP 2: Uses Gemini API in JSON Mode to parse the messy text
@@ -149,6 +155,7 @@ def convert_text_to_json_with_gemini(raw_text):
         generation_config = types.GenerateContentConfig(
             response_mime_type="application/json"
         )
+        # --- UPDATED PROMPT (JSON SCHEMA) ---
         prompt = f"""
         Please parse the following text and convert it into a valid JSON array.
         The JSON schema must be:
@@ -157,7 +164,8 @@ def convert_text_to_json_with_gemini(raw_text):
             "title": "string (The headline of the article)",
             "summary": "string (The concise summary of the article)",
             "url": "string (The direct URL to the article)",
-            "author": "string (The author's name, or 'N/A' if not found)"
+            "author": "string (The author's name, or 'N/A' if not found)",
+            "image_url": "string (The URL of a relevant image, or 'N/A' if not found)"
           }}
         ]
         Your entire response must be *only* this JSON array.
@@ -167,6 +175,8 @@ def convert_text_to_json_with_gemini(raw_text):
         {raw_text}
         ---
         """
+        # --- END UPDATED PROMPT ---
+        
         response = gemini_client.models.generate_content(
             model='gemini-2.5-flash',
             contents=prompt,
@@ -235,7 +245,6 @@ def get_openai_perspective(gemini_summary, article_title):
         print(f"OpenAI summary FAILED: {e}", file=sys.stderr)
         return None
 
-# --- UPDATED FUNCTION: Step 5 ---
 def send_email(subject, html_body, to_email):
     """
     Step 5: Sends the email using smtplib.
@@ -253,10 +262,7 @@ def send_email(subject, html_body, to_email):
     msg['To'] = to_email
     msg['Subject'] = subject
     
-    # --- THIS IS THE KEY CHANGE ---
-    # We now attach the body as 'html' instead of 'plain'
     msg.attach(MIMEText(html_body, 'html'))
-    # --- END KEY CHANGE ---
     
     try:
         print(f"Connecting to email server {host}:{port}...")
@@ -305,13 +311,11 @@ def main():
                 if headlines_list:
                     print("\n--- Headlines & AI Summaries ---")
                     
-                    # --- NEW: Prepare HTML email content ---
                     today_date = datetime.now().strftime("%m/%d/%Y")
                     email_subject = f"News Summary for {today_date}"
                     
                     email_body_parts = []
                     
-                    # Add the main header
                     email_body_parts.append(f"<h1 style='font-family: Arial, sans-serif;'>News Summary for {today_date}</h1>")
                     email_body_parts.append(f"<p style='font-family: Arial, sans-serif;'>Your top {len(headlines_list)} stories.</p><hr>")
                     
@@ -321,6 +325,9 @@ def main():
                         gemini_summary = article.get('summary', 'No Summary Found')
                         author = article.get('author', 'N/A')
                         
+                        # --- NEW: Get the image URL ---
+                        image_url = article.get('image_url', None)
+
                         # 4. Get OpenAI summary
                         openai_summary = get_openai_perspective(gemini_summary, title)
                         if not openai_summary:
@@ -330,17 +337,30 @@ def main():
                         print(f"\n## {title}")
                         print(f"Link: {url}")
                         print(f"Author: {author}")
+                        # --- NEW: Print image URL to console ---
+                        print(f"Image: {image_url if image_url else 'N/A'}")
                         print(f"\nGemini Summary:\n{gemini_summary}")
                         print(f"\nOpenAI Summary:\n{openai_summary}")
                         print("-------------------------------------")
                         
-                        # --- NEW: Build the HTML string for this article ---
+                        
+                        # --- UPDATED: Build the HTML string for this article ---
                         
                         # Only include author if it's not "N/A"
                         author_part = f"<i>{author}</i> - " if author and author.lower() != 'n/a' else ""
                         
                         # Create a clickable link
                         link = f'<a href="{url}">{url}</a>'
+                        
+                        # --- NEW: Create image HTML if available ---
+                        # We check for None, 'n/a', and empty string
+                        image_part = ""
+                        if image_url and image_url.lower() not in ['n/a', 'none', '']:
+                            image_part = f'''
+                            <img src="{image_url}"
+                                 alt="{title}"
+                                 style="max-width: 100%; height: auto; border-radius: 8px; margin-bottom: 10px;">
+                            '''
                         
                         # Build the HTML block for this article
                         article_html = f"""
@@ -351,6 +371,8 @@ def main():
                             <p style="font-size: 0.9em; color: #333; margin-top: 0; margin-bottom: 10px;">
                                 {author_part}{link}
                             </p>
+                            
+                            {image_part}
                             
                             <b style="font-size: 1.0em;">Summary by Gemini:</b>
                             <ul style="margin-top: 5px;">
@@ -365,13 +387,12 @@ def main():
                         <hr style="border: 0; border-top: 1px solid #eee;">
                         """
                         email_body_parts.append(article_html)
-                        # --- END NEW HTML BLOCK ---
+                        # --- END UPDATED HTML BLOCK ---
                         
                         time.sleep(1)
                     
                     # --- 5. Send the email ---
                     
-                    # Join all the parts into one big HTML document
                     final_email_body = f"""
                     <html>
                         <head></head>
