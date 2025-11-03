@@ -4,20 +4,22 @@ Quarterly-Assessment-3
 Overview
 --------
 
-This project contains Python scripts designed to interact with the Google Gemini and OpenAI APIs. The main application (`news-recap-and-email.py`) fetches current news headlines, generates summaries using both AI models, and sends a consolidated HTML email report. A utility script (`api-tests.py`) is also included to verify API key setup and connectivity.
+This project contains Python scripts designed to interact with the Google Gemini, OpenAI, and **NewsAPI** services. The main application (`news-recap-and-email.py`) fetches the top 4 current news headlines from NewsAPI, generates comparative summaries using both Gemini and OpenAI, and sends a consolidated HTML email report with embedded images. A utility script (`api-tests.py`) is also included to verify all API key setups and connectivity.
 
 🚀 Features
 -----------
 
--   **Dual-AI Summaries:** Generates news summaries from both Google Gemini and OpenAI for comparison.
+-   **Reliable News Source:** Uses **NewsAPI.org** to get clean, structured JSON with stable article links and image URLs.
 
--   **News Fetching:** Uses Gemini's built-in Google Search tool to find recent, relevant news.
+-   **Dual-AI Summaries:** Generates news summaries from both Google Gemini and OpenAI based on a common base summary for a true side-by-side comparison.
 
--   **Structured Data:** Leverages Gemini's JSON Mode to convert unstructured text into clean, parsable JSON.
+-   **Robust Image Embedding:** Downloads images and reliably embeds them in the email by checking the `Content-Type` header, not just the file extension.
 
--   **HTML Email Reports:** Creates a formatted HTML email with headlines, links, and both AI summaries.
+-   **Formatted HTML Email:** Creates a clean, professional HTML email with formatted dates (e.g., "November 3rd, 2025"), clickable headlines, and embedded images.
 
 -   **Secure Setup:** Uses a `.env` file to securely manage all API keys and email credentials.
+
+-   **Pre-flight Check:** Includes a test script to validate all three API connections before running the main application.
 
 * * * * *
 
@@ -30,13 +32,15 @@ A simple utility script to test API keys and connectivity **before** running the
 
 **What it does:**
 
-1.  Loads `OPENAI_API_KEY` and `GEMINI_API_KEY` from the `.env` file.
+1.  Loads `OPENAI_API_KEY`, `GEMINI_API_KEY`, and `NEWS_API_KEY` from the `.env` file.
 
 2.  Performs a basic "Hello" check against the OpenAI API (`gpt-3.5-turbo`).
 
-3.  Performs a basic "Hello" check against the Google Gemini API (`gemini-2.5-flash`).
+3.  Performs a basic "Hello" check against the Google Gemini API (`gemini-2.5-pro`).
 
-4.  Reports success or failure for each service.
+4.  Performs a basic headline fetch against **NewsAPI** to ensure the key is valid.
+
+5.  Reports success or failure for each of the three services.
 
 ### 2\. `news-recap-and-email.py`
 
@@ -44,37 +48,29 @@ This is the main application. It runs a multi-step process to fetch, analyze, an
 
 **What it does:**
 
-1.  **Step 1: Fetch News (Gemini)**
+1.  **Step 1: Fetch News (NewsAPI)**
 
-    -   Uses the Gemini API and its **Google Search tool** to find the 5 most recent, major news headlines.
+    -   Connects to **NewsAPI.org** and fetches the top 5 current headlines for the US.
 
-    -   The output is a single string of natural language text.
+    -   This provides a reliable JSON list of articles, each with a stable title, author, URL, base summary (description), and image URL.
 
-2.  **Step 2: Convert to JSON (Gemini)**
+2.  **Step 2: Get AI Perspectives (Gemini & OpenAI)**
 
-    -   Takes the raw text from Step 1 and sends it back to the Gemini API, but this time using **JSON Mode**.
+    -   Loops through each article from NewsAPI.
 
-    -   It prompts the model to parse the text into a structured JSON array, which is much easier and more reliable to work with in Python.
+    -   Sends the `base_summary` and `title` to the **Gemini API** for its rewritten summary.
 
-3.  **Step 3: Parse (Python)**
+    -   Sends the same `base_summary` and `title` to the **OpenAI API** for its rewritten summary.
 
-    -   Parses the guaranteed-valid JSON string from Step 2 into a Python list of dictionaries.
+3.  **Step 3: Send Email (smtplib)**
 
-4.  **Step 4: Get Second Opinion (OpenAI)**
+    -   Generates a formatted date string (e.g., "November 3rd, 2025").
 
-    -   Loops through each article in the list.
+    -   For each article, it attempts to download the provided image. It **reliably detects the image type** by reading the server's `Content-Type` header.
 
-    -   For each article, it sends the headline and Gemini-generated summary to the **OpenAI API** (`gpt-3.5-turbo`).
+    -   Compiles all data (titles, links, summaries, and embedded images) into a clean **HTML body**.
 
-    -   It asks OpenAI to provide its own neutral, one-paragraph summary of the event.
-
-5.  **Step 5: Send Email (smtplib)**
-
-    -   Compiles all the data (titles, links, Gemini summaries, OpenAI summaries) into a clean **HTML body**.
-
-    -   Connects to an SMTP server (like Gmail) using credentials from the `.env` file.
-
-    -   Sends the final HTML report to the specified recipient.
+    -   Connects to an SMTP server (like Gmail) using credentials from the `.env` file and sends the final report.
 
 * * * * *
 
@@ -88,7 +84,7 @@ This project requires a few Python libraries. You can install them using pip:
 Bash
 
 ```
-pip install python-dotenv openai google-generativeai
+pip install python-dotenv openai google-generativeai requests
 ```
 
 ### 2\. Create Environment File
@@ -102,6 +98,7 @@ Copy the example below into your `.env` file and fill in your own values.
 # --- API Keys ---
 OPENAI_API_KEY="sk-..."
 GEMINI_API_KEY="AIza..."
+NEWS_API_KEY="YOUR_API_KEY_FROM_NEWSAPI.ORG"
 
 # --- Email Configuration (Example for Gmail) ---
 EMAIL_SENDER="your-email@gmail.com"
@@ -139,8 +136,11 @@ Gemini API check successful.
 Checking OpenAI API...
 OpenAI API check successful.
 ------------------------------
+Checking NewsAPI...
+NewsAPI check successful.
+------------------------------
 
-Success: Both API checks passed.
+Success: All API checks passed.
 Script is ready for news API logic.
 Script finished.
 ```

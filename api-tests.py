@@ -2,6 +2,7 @@
 
 import os
 import sys
+import requests # --- NEW: Added for NewsAPI check ---
 
 try:
     from dotenv import load_dotenv
@@ -24,9 +25,9 @@ except ImportError:
 load_dotenv()
 
 # --- API Key Configuration ---
-# Load API keys from environment variables for security
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") # For Gemini
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+NEWS_API_KEY = os.getenv("NEWS_API_KEY") # --- NEW ---
 
 def check_api_keys():
     """Checks if the required API keys are set in the environment."""
@@ -36,22 +37,22 @@ def check_api_keys():
     if not GEMINI_API_KEY:
         print("Error: GEMINI_API_KEY environment variable not set.", file=sys.stderr)
         return False
+    # --- NEW CHECK ---
+    if not NEWS_API_KEY:
+        print("Error: NEWS_API_KEY environment variable not set.", file=sys.stderr)
+        return False
     return True
 
 def check_gemini():
-    """
-    Performs a simple initialization check on the Google Gemini API.
-    """
+    """Performs a simple initialization check on the Google Gemini API."""
     print("Checking Google Gemini API...")
     try:
-        # Configure the Gemini client
-        genai.configure(api_key=GEMINI_API_KEY)
-        
-        # Use a fast and cost-effective model for the check
-        model = genai.GenerativeModel('gemini-2.5-flash')
-        
-        # Send a simple test prompt
-        response = model.generate_content("Hello")
+        # Using the Client method from your script
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        response = client.models.generate_content(
+            model='gemini-2.5-pro', 
+            contents="Hello"
+        )
         
         if response.text and len(response.text) > 0:
             print("Gemini API check successful.")
@@ -65,22 +66,14 @@ def check_gemini():
         return False
 
 def check_openai():
-    """
-    Performs a simple initialization check on the OpenAI API.
-    
-    """
+    """Performs a simple initialization check on the OpenAI API."""
     print("Checking OpenAI API...")
     try:
-        # The client automatically picks up the OPENAI_API_KEY env var
-        client = OpenAI()
-        
-        # Send a simple test prompt
+        client = OpenAI(api_key=OPENAI_API_KEY)
         response = client.chat.completions.create(
-            model="gpt-3.5-turbo",  # Using a standard, fast model for the check
-            messages=[
-                {"role": "system", "content": "You are a helpful assistant."},
-                {"role": "user", "content": "Hello"}
-            ]
+            model="gpt-3.5-turbo",
+            messages=[{"role": "user", "content": "Hello"}],
+            max_tokens=5
         )
         
         if response.choices[0].message.content and len(response.choices[0].message.content) > 0:
@@ -94,10 +87,37 @@ def check_openai():
         print(f"OpenAI API check FAILED: {e}", file=sys.stderr)
         return False
 
+# --- NEW FUNCTION ---
+def check_newsapi():
+    """Performs a simple check on the NewsAPI."""
+    print("Checking NewsAPI...")
+    try:
+        # Make a simple request for 1 article
+        url = f"https://newsapi.org/v2/top-headlines?country=us&pageSize=1&apiKey={NEWS_API_KEY}"
+        response = requests.get(url, timeout=10)
+        
+        # Check for HTTP error
+        response.raise_for_status() 
+        
+        data = response.json()
+        
+        # Check for API error
+        if data.get('status') == 'ok':
+            print("NewsAPI check successful.")
+            return True
+        else:
+            print(f"NewsAPI check FAILED: {data.get('message')}", file=sys.stderr)
+            return False
+            
+    except requests.exceptions.RequestException as e:
+        print(f"NewsAPI check FAILED: {e}", file=sys.stderr)
+        return False
+    except Exception as e:
+        print(f"NewsAPI check FAILED: An unexpected error occurred: {e}", file=sys.stderr)
+        return False
+
 def main():
-    """
-    Main function to run the API checks.
-    """
+    """Main function to run the API checks."""
     print("Starting API initialization checks...")
     
     if not check_api_keys():
@@ -109,11 +129,14 @@ def main():
     print("-" * 30)
     openai_ok = check_openai()
     print("-" * 30)
+    # --- NEW CHECK ---
+    newsapi_ok = check_newsapi()
+    print("-" * 30)
 
-    if gemini_ok and openai_ok:
-        print("\nSuccess: Both API checks passed.")
+    # --- UPDATED SUCCESS MESSAGE ---
+    if gemini_ok and openai_ok and newsapi_ok:
+        print("\nSuccess: All API checks passed.")
         print("Script is ready for news API logic.")
-        # Future logic to query news APIs will go here.
     else:
         print("\nFailure: One or more API checks failed.", file=sys.stderr)
         print("Please check your API keys, network connection, and account status.", file=sys.stderr)
