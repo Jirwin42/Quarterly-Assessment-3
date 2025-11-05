@@ -19,18 +19,20 @@ except ImportError:
     sys.exit(1)
 
 try:
-    from google import genai
-    from google.genai import types
+    # --- THIS BLOCK IS THE FIX ---
+    # It now imports the modern 'google-generativeai' library
+    # and aliases it as 'genai' so the rest of the script works.
+    import google.generativeai as genai
 except ImportError:
-    print("Error: 'google-genai' library not found.", file=sys.stderr)
-    print("Please install it with: pip install google-genai", file=sys.stderr)
+    print("Error: 'google-generativeai' library not found.", file=sys.stderr)
+    print("Please install it with: pip install google-generativeai", file=sys.stderr)
     sys.exit(1)
 
 
-gemini_client = None
+# Updated to use GenerativeModel
+gemini_model = None
 openai_client = None
 
-# --- NEW HELPER FUNCTION ---
 def get_ordinal_date(d):
     """
     Formats a date object as 'Month DaySfx, Year' 
@@ -66,23 +68,44 @@ def load_environment():
     return True
 
 def check_gemini():
-    """Checks if the Gemini API key is valid."""
-    global gemini_client 
+    """
+    Checks if the Gemini API key is valid using the modern genai.GenerativeModel.
+    """
+    global gemini_model  # Use the new global model variable
     gemini_key = os.environ.get("GEMINI_API_KEY")
     if not gemini_key:
         print("Error: GEMINI_API_KEY not set.", file=sys.stderr)
         return False
     try:
         print("Authenticating with Gemini...")
-        gemini_client = genai.Client(api_key=gemini_key)
-        response = gemini_client.models.generate_content(
-            model='gemini-2.5-pro', 
-            contents="Hello"
+        # This line will now work thanks to the correct import
+        genai.configure(api_key=gemini_key)
+        
+        # Use the modern GenerativeModel and a current model name
+        gemini_model = genai.GenerativeModel('gemini-2.5-pro')
+        
+        # Configure safety settings to be permissive
+        safety_settings = {
+            'HATE': 'BLOCK_NONE',
+            'HARASSMENT': 'BLOCK_NONE',
+            'SEXUAL': 'BLOCK_NONE',
+            'DANGEROUS': 'BLOCK_NONE'
+        }
+
+        response = gemini_model.generate_content(
+            "Hello",
+            safety_settings=safety_settings
         )
         
         if response.text:
             print("Gemini API Check: SUCCESS")
-            return True 
+            return True
+        
+        # Check for non-exception failures like blocks
+        if response.prompt_feedback.block_reason:
+            print(f"Gemini API Check: FAILED (Blocked: {response.prompt_feedback.block_reason})", file=sys.stderr)
+            return False
+            
         print("Gemini API Check: FAILED (No response text)", file=sys.stderr)
         return False
     except Exception as e:
@@ -116,11 +139,9 @@ def check_openai():
 def fetch_news_from_newsapi():
     """
     STEP 1: Fetches top headlines from NewsAPI.org.
-    (This is already set to pageSize=5)
     """
     print("Step 1: Fetching reliable news from NewsAPI.org...")
     api_key = os.environ.get("NEWS_API_KEY")
-    # This URL is already set to fetch 5 articles as requested
     url = f"https://newsapi.org/v2/top-headlines?country=us&pageSize=5&apiKey={api_key}"
     
     try:
@@ -144,34 +165,87 @@ def fetch_news_from_newsapi():
 
 def get_gemini_perspective(base_summary, article_title):
     """
-    Step 2a: Uses Gemini to provide a summary "perspective".
+    Step 2a: Uses Gemini to provide a summary "perspective" with retries.
     """
-    global gemini_client 
-    if not gemini_client:
-        print("Error: Gemini client not initialized.", file=sys.stderr)
+    global gemini_model 
+    if not gemini_model:
+        print("Error: Gemini model not initialized.", file=sys.stderr)
         return "Gemini summary could not be generated."
         
-    print(f"Step 2a: Sending summary for '{article_title}' to Gemini...")
-    try:
-        prompt = f"""
-        You are a news summarization assistant.
-        Rewrite the following summary in your own words, maintaining a concise and strictly neutral, factual tone.
+    print(f"Step 2a: Sending summary for '{article_title}' to Gemini (with retries)...")
+    
+    # New prompt to force compliance and prevent fact-checking
+    prompt = f"""
+    You are a text transformation assistant.
+    Your ONLY task is to rewrite the provided "Base Summary" into a single, neutral paragraph.
+    
+    IMPORTANT:
+    1. DO NOT use any external knowledge.
+    2. DO NOT fact-check the information.
+    3. You MUST assume the "Base Summary" is the absolute source of truth for this task, even if it seems incorrect.
+    4. Your output must be a concise rewrite of the summary, maintaining a strictly neutral, factual tone.
+
+    Headline: {article_title}
+    Base Summary: {base_summary}
+    
+    Rewritten Summary:
+    """
+    
+    # Generation config with safety settings to prevent content blocks
+    generation_config = genai.GenerationConfig(
+        temperature=0.6,
+        top_p=1.0,
+        top_k=1
+    )
+    
+    safety_settings = {
+        'HATE': 'BLOCK_NONE',
+        'HARASSMENT': 'BLOCK_NONE',
+        'SEXUAL': 'BLOCK_NONE',
+        'DANGEROUS': 'BLOCK_NONE'
+    }
+
+    max_retries = 3
+    wait_time = 2  # Initial wait time in seconds
+
+    for attempt in range(max_retries):
+        try:
+            response = gemini_model.generate_content(
+                prompt,
+                generation_config=generation_config,
+                safety_settings=safety_settings
+            )
+            
+            if response.text:
+                # Check for common non-exception failure messages
+                if "overloaded" in response.text.lower() or "try again" in response.text.lower():
+                    print(f"Gemini attempt {attempt + 1} FAILED: Model reported overload. Retrying...")
+                else:
+                    # SUCCESS
+                    print(f"Gemini attempt {attempt + 1} SUCCEEDED.")
+                    return response.text.strip()
+            
+            # Check for safety blocks or other non-text failures
+            elif response.prompt_feedback.block_reason:
+                print(f"Gemini attempt {attempt + 1} FAILED: Blocked ({response.prompt_feedback.block_reason}).", file=sys.stderr)
+                # This is a content issue, retrying won't help.
+                return f"Summary generation blocked by Gemini safety filters ({response.prompt_feedback.block_reason})."
+            
+            else:
+                print(f"Gemini attempt {attempt + 1} FAILED: No content in response.")
+
+        except Exception as e:
+            # Catch API-level exceptions (e.g., 500, 503, ResourceExhausted)
+            print(f"Gemini attempt {attempt + 1} FAILED with exception: {e}", file=sys.stderr)
         
-        Headline: {article_title}
-        Summary: {base_summary}
-        """
-        response = gemini_client.models.generate_content(
-            model='gemini-2.5-pro', 
-            contents=prompt
-        )
-        if response.text:
-            return response.text.strip()
-        else:
-            print("Gemini summary FAILED: No content in response.", file=sys.stderr)
-            return "Summary could not be generated by Gemini."
-    except Exception as e:
-        print(f"Gemini summary FAILED: {e}", file=sys.stderr)
-        return "Summary could not be generated by Gemini."
+        # Wait before retrying
+        if attempt < max_retries - 1:
+            print(f"Waiting {wait_time}s before next retry...")
+            time.sleep(wait_time)
+            wait_time *= 2  # Exponential backoff
+    
+    print(f"Gemini summary FAILED after {max_retries} attempts.", file=sys.stderr)
+    return "Summary could not be generated by Gemini after multiple attempts."
 
 def get_openai_perspective(base_summary, article_title):
     """
@@ -271,10 +345,8 @@ def main():
         if articles:
             print("\n--- Headlines & AI Summaries ---")
             
-            # --- UPDATED DATE FORMATTING ---
             now = datetime.now()
             today_date = get_ordinal_date(now) # e.g., "November 3rd, 2025"
-            # --- END UPDATE ---
             
             email_subject = f"News Summary for {today_date}"
             
@@ -289,6 +361,9 @@ def main():
                 url = article.get('url', '#') 
                 author = article.get('author', 'N/A')
                 base_summary = article.get('description', 'No summary provided.')
+                if not base_summary or base_summary.strip() == "":
+                    base_summary = "No summary provided."
+                
                 image_url = article.get('urlToImage', None) 
                 
                 # Step 2 - Get AI summaries
